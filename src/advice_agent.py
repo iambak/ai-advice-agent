@@ -27,14 +27,14 @@ class ResponseCache:
         self.max_size = max_size
         self.ttl_seconds = ttl_seconds
 
-    def _generate_key(self, question: str, context: Optional[str] = None) -> str:
-        """Generate cache key from question and context"""
-        content = f"{question}|{context or ''}"
+    def _generate_key(self, user_id: str, question: str, context: Optional[str] = None) -> str:
+        """Generate cache key from user_id, question and context"""
+        content = f"{user_id}|{question}|{context or ''}"
         return hashlib.md5(content.encode()).hexdigest()
 
-    def get(self, question: str, context: Optional[str] = None) -> Optional[str]:
+    def get(self, user_id: str, question: str, context: Optional[str] = None) -> Optional[str]:
         """Get cached response if exists and not expired"""
-        key = self._generate_key(question, context)
+        key = self._generate_key(user_id, question, context)
 
         if key in self.cache:
             response, timestamp = self.cache[key]
@@ -48,9 +48,9 @@ class ResponseCache:
 
         return None
 
-    def set(self, question: str, context: Optional[str], response: str):
+    def set(self, user_id: str, question: str, context: Optional[str], response: str):
         """Cache response with TTL"""
-        key = self._generate_key(question, context)
+        key = self._generate_key(user_id, question, context)
 
         # If cache is full, remove oldest entry
         if len(self.cache) >= self.max_size:
@@ -151,14 +151,8 @@ class AdviceGenerator:
             return "I'd be happy to help! Could you please ask me a specific question?"
 
         try:
-            # Check cache first for instant responses
-            cached_response = response_cache.get(question, context)
-            if cached_response:
-                logger.info(f"Returning cached advice for user {user_id}")
-                return cached_response
-
-            # Cache miss - generate new response
-            logger.info(f"Cache miss - generating new advice for user {user_id}")
+            # Generate new response (cache already checked in lambda_handler)
+            logger.info(f"Generating new advice for user {user_id}")
 
             # Stage 1: Get raw advice from external API
             raw_advice = self._get_external_advice(question, context)
@@ -172,7 +166,7 @@ class AdviceGenerator:
                 final_advice = self._enhance_with_bedrock(raw_advice, question, context, user_id)
 
             # Cache the final response
-            response_cache.set(question, context, final_advice)
+            response_cache.set(user_id, question, context, final_advice)
 
             logger.info(f"Successfully generated and cached advice for user {user_id}")
             return final_advice
@@ -467,6 +461,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         # Validate required fields
         user_id = body.get('user_id')
         question = body.get('question')
+        advice_context = body.get('context')
 
         if not user_id:
             return {
@@ -504,8 +499,24 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         permission_status, user_data = permission_checker.check_user_permission(user_id, agent_name)
 
         if permission_status == PermissionStatus.GRANTED:
-            # User has permission, proceed with advice generation
-            pass
+            # User has permission, check cache first before generating advice
+            # Check cache first for instant responses (after permission validation)
+            cached_response = response_cache.get(user_id, question, advice_context)
+            if cached_response:
+                logger.info(f"Returning cached advice for validated user {user_id}")
+                return {
+                    'statusCode': 200,
+                    'headers': headers,
+                    'body': json.dumps({
+                        'status': 'success',
+                        'data': {
+                            'advice': cached_response,
+                            'user_id': user_id,
+                            'timestamp': context.aws_request_id if context else None,
+                            'cached': True
+                        }
+                    })
+                }
         elif permission_status == PermissionStatus.USER_EXISTS_NO_PERMISSION:
             # User exists but lacks permission - offer subscription
             return {
@@ -563,7 +574,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         advice_generator = AdviceGenerator()
         advice = advice_generator.generate_advice(
             question=question,
-            context=body.get('context'),
+            context=advice_context,
             user_id=user_id
         )
 
