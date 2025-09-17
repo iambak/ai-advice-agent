@@ -1,0 +1,28 @@
+# AI Advice Agent Dependencies
+
+# HTTP requests for API integration
+requests==2.31.0
+
+# AWS SDK for Bedrock integration
+boto3>=1.28.0
+botocore>=1.31.0
+
+# JSON handling (built-in, but listed for clarity)
+# json
+
+# Logging (built-in)
+# logging
+
+# Optional: For enhanced JSON handling
+# ujson==5.8.0
+
+# Optional: For input validation
+# pydantic==2.4.2
+
+# Optional: For more advanced HTTP client features
+# httpx==0.25.0
+
+# Development dependencies (not needed in production)
+# pytest==7.4.2
+# black==23.9.1
+# flake8==6.1.0

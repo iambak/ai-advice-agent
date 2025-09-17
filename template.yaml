@@ -1,0 +1,219 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: 'AI Advice Agent - Serverless application for providing personalized advice with permission checking'
+
+Globals:
+  Function:
+    Timeout: 300
+    MemorySize: 512
+    Runtime: python3.9
+    Environment:
+      Variables:
+        PERMISSION_API_URL: !Ref PermissionApiUrl
+        AGENT_NAME: !Ref AgentName
+        LOG_LEVEL: !Ref LogLevel
+        BEDROCK_MODEL_ID: !Ref BedrockModelId
+        BEDROCK_REGION: !Ref BedrockRegion
+        EXTERNAL_ADVICE_API_URL: !Ref ExternalAdviceApiUrl
+        ADVICE_LENGTH: !Ref AdviceLength
+        ADVICE_TEMPERATURE: !Ref AdviceTemperature
+
+Parameters:
+  PermissionApiUrl:
+    Type: String
+    Default: 'https://kpfnbcvnfb.execute-api.us-east-1.amazonaws.com/dev'
+    Description: Base URL for the Agent Permission API
+
+  AgentName:
+    Type: String
+    Default: 'advice-agent'
+    Description: Name of this agent for permission checking
+
+  LogLevel:
+    Type: String
+    Default: 'INFO'
+    AllowedValues: ['DEBUG', 'INFO', 'WARNING', 'ERROR']
+    Description: Logging level for Lambda functions
+
+  BedrockModelId:
+    Type: String
+    Default: 'anthropic.claude-3-haiku-20240307-v1:0'
+    Description: Bedrock model ID for advice generation
+
+  BedrockRegion:
+    Type: String
+    Default: 'us-east-1'
+    Description: AWS region for Bedrock service
+
+  ExternalAdviceApiUrl:
+    Type: String
+    Default: 'http://3.93.70.165:8000/advise'
+    Description: External advice API endpoint URL
+
+  AdviceLength:
+    Type: String
+    Default: 'long'
+    AllowedValues: ['short', 'medium', 'long']
+    Description: Default length for external advice API
+
+  AdviceTemperature:
+    Type: String
+    Default: '0.5'
+    Description: Temperature setting for external advice API (0.0-1.0)
+
+Resources:
+  AdviceAgentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: advice_agent.lambda_handler
+      Description: 'AI Advice Agent that provides personalized advice with permission verification'
+      Policies:
+        - Statement:
+          - Effect: Allow
+            Action:
+              - bedrock:InvokeModel
+              - bedrock:InvokeModelWithResponseStream
+            Resource:
+              - 'arn:aws:bedrock:*::foundation-model/*'
+              - !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/*'
+      Events:
+        AdviceApi:
+          Type: Api
+          Properties:
+            Path: /advice
+            Method: post
+            RestApiId: !Ref AdviceAgentApi
+        AdviceApiOptions:
+          Type: Api
+          Properties:
+            Path: /advice
+            Method: options
+            RestApiId: !Ref AdviceAgentApi
+
+  AdviceAgentApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: dev
+      Description: 'API Gateway for AI Advice Agent'
+      Cors:
+        AllowMethods: "'POST,OPTIONS'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+        AllowOrigin: "'*'"
+      DefinitionBody:
+        openapi: 3.0.1
+        info:
+          title: AI Advice Agent API
+          version: 1.0.0
+        paths:
+          /advice:
+            post:
+              summary: Get personalized advice
+              requestBody:
+                required: true
+                content:
+                  application/json:
+                    schema:
+                      type: object
+                      required:
+                        - user_id
+                        - question
+                      properties:
+                        user_id:
+                          type: string
+                          description: User identifier
+                        question:
+                          type: string
+                          description: The question to get advice for
+                        context:
+                          type: string
+                          description: Optional context to improve advice quality
+                      example:
+                        user_id: "john"
+                        question: "How can I improve my programming skills?"
+                        context: "I'm a beginner developer"
+              responses:
+                '200':
+                  description: Advice generated successfully
+                  content:
+                    application/json:
+                      schema:
+                        type: object
+                        properties:
+                          status:
+                            type: string
+                            enum: ["success"]
+                          data:
+                            type: object
+                            properties:
+                              advice:
+                                type: string
+                              user_id:
+                                type: string
+                              timestamp:
+                                type: string
+                '403':
+                  description: User lacks permission
+                  content:
+                    application/json:
+                      schema:
+                        type: object
+                        properties:
+                          status:
+                            type: string
+                            enum: ["error"]
+                          error:
+                            type: object
+                            properties:
+                              code:
+                                type: string
+                                enum: ["ACCESS_DENIED"]
+                              message:
+                                type: string
+                              user_id:
+                                type: string
+                '400':
+                  description: Invalid request
+                '500':
+                  description: Service error
+              x-amazon-apigateway-integration:
+                httpMethod: POST
+                type: aws_proxy
+                uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${AdviceAgentFunction.Arn}/invocations'
+            options:
+              summary: CORS preflight
+              responses:
+                '200':
+                  description: CORS headers
+              x-amazon-apigateway-integration:
+                httpMethod: POST
+                type: aws_proxy
+                uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${AdviceAgentFunction.Arn}/invocations'
+
+  # CloudWatch Log Group for Lambda function
+  AdviceAgentLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AdviceAgentFunction}'
+      RetentionInDays: 30
+
+Outputs:
+  AdviceAgentApi:
+    Description: 'API Gateway endpoint URL for AI Advice Agent'
+    Value: !Sub 'https://${AdviceAgentApi}.execute-api.${AWS::Region}.amazonaws.com/dev/'
+
+  AdviceAgentFunction:
+    Description: 'AI Advice Agent Lambda Function ARN'
+    Value: !GetAtt AdviceAgentFunction.Arn
+
+  AdviceAgentIamRole:
+    Description: 'Implicit IAM Role created for AI Advice Agent function'
+    Value: !GetAtt AdviceAgentFunctionRole.Arn
+
+  ApiDocumentation:
+    Description: 'Link to API documentation'
+    Value: !Sub 'https://${AdviceAgentApi}.execute-api.${AWS::Region}.amazonaws.com/dev/'
+
+  PermissionApiReference:
+    Description: 'Permission API being used for authorization'
+    Value: !Ref PermissionApiUrl
