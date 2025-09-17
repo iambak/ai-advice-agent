@@ -62,6 +62,69 @@ Parameters:
     Description: Temperature setting for external advice API (0.0-1.0)
 
 Resources:
+  # Bedrock Permission Checker Lambda for Agent Action Groups
+  BedrockPermissionCheckerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: bedrock_permission_checker.lambda_handler
+      Description: 'Permission checker Lambda for Bedrock Agent action groups'
+      Environment:
+        Variables:
+          PERMISSION_API_BASE: !Ref PermissionApiUrl
+      Events: {}  # No API events needed for Bedrock integration
+
+  # Permission for Bedrock to invoke the permission checker Lambda
+  BedrockPermissionCheckerInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref BedrockPermissionCheckerFunction
+      Action: lambda:InvokeFunction
+      Principal: bedrock.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+
+  # Bedrock API Proxy Lambda - Simple proxy to call the main advice API
+  BedrockApiProxyFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./
+      Handler: bedrock_api_proxy.lambda_handler
+      Description: 'Simple Lambda proxy for Bedrock to invoke the advice API'
+      Environment:
+        Variables:
+          ADVICE_API_URL: !Sub 'https://${AdviceAgentApi}.execute-api.${AWS::Region}.amazonaws.com/dev/advice'
+      Events: {}  # No API events needed for Bedrock integration
+
+  # Permission for Bedrock to invoke the API proxy Lambda
+  BedrockApiProxyInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref BedrockApiProxyFunction
+      Action: lambda:InvokeFunction
+      Principal: bedrock.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+
+  # Subscription Handler Lambda for user self-service subscription
+  SubscriptionHandlerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: subscription_handler.lambda_handler
+      Description: 'Handler for user subscription to agents'
+      Events:
+        SubscriptionApi:
+          Type: Api
+          Properties:
+            Path: /subscribe/{user_id}
+            Method: post
+            RestApiId: !Ref AdviceAgentApi
+        SubscriptionApiOptions:
+          Type: Api
+          Properties:
+            Path: /subscribe/{user_id}
+            Method: options
+            RestApiId: !Ref AdviceAgentApi
+
   AdviceAgentFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -189,15 +252,163 @@ Resources:
                 httpMethod: POST
                 type: aws_proxy
                 uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${AdviceAgentFunction.Arn}/invocations'
+          /subscribe/{user_id}:
+            post:
+              summary: Subscribe user to agent
+              parameters:
+                - name: user_id
+                  in: path
+                  required: true
+                  schema:
+                    type: string
+                  description: User identifier
+              requestBody:
+                required: true
+                content:
+                  application/json:
+                    schema:
+                      type: object
+                      required:
+                        - agent_name
+                      properties:
+                        agent_name:
+                          type: string
+                          description: Name of the agent to subscribe to
+                      example:
+                        agent_name: "advice-agent"
+              responses:
+                '200':
+                  description: Successfully subscribed to agent
+                  content:
+                    application/json:
+                      schema:
+                        type: object
+                        properties:
+                          status:
+                            type: string
+                            enum: ["success"]
+                          data:
+                            type: object
+                            properties:
+                              message:
+                                type: string
+                              user_id:
+                                type: string
+                              agent_name:
+                                type: string
+                              timestamp:
+                                type: string
+                '400':
+                  description: Invalid request
+                  content:
+                    application/json:
+                      schema:
+                        type: object
+                        properties:
+                          status:
+                            type: string
+                            enum: ["error"]
+                          error:
+                            type: object
+                            properties:
+                              code:
+                                type: string
+                              message:
+                                type: string
+                '403':
+                  description: User profile not found or permission denied
+                  content:
+                    application/json:
+                      schema:
+                        type: object
+                        properties:
+                          status:
+                            type: string
+                            enum: ["error"]
+                          error:
+                            type: object
+                            properties:
+                              code:
+                                type: string
+                              message:
+                                type: string
+                              user_id:
+                                type: string
+                '500':
+                  description: Service error
+              x-amazon-apigateway-integration:
+                httpMethod: POST
+                type: aws_proxy
+                uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${SubscriptionHandlerFunction.Arn}/invocations'
+            options:
+              summary: CORS preflight for subscription
+              responses:
+                '200':
+                  description: CORS headers
+              x-amazon-apigateway-integration:
+                httpMethod: POST
+                type: aws_proxy
+                uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${SubscriptionHandlerFunction.Arn}/invocations'
 
-  # CloudWatch Log Group for Lambda function
+  # CloudWatch Log Groups for Lambda functions
   AdviceAgentLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Sub '/aws/lambda/${AdviceAgentFunction}'
       RetentionInDays: 30
 
+  SubscriptionHandlerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${SubscriptionHandlerFunction}'
+      RetentionInDays: 30
+
+  # Scheduled warm-up event to keep Lambda and Bedrock warm
+  WarmupScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: 'Keep AI Advice Agent Lambda and Bedrock warm'
+      ScheduleExpression: 'rate(10 minutes)'  # Every 10 minutes - avoid throttling
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt AdviceAgentFunction.Arn
+          Id: 'WarmupTarget'
+          Input: '{"warmup": true, "source": "scheduled-event"}'
+
+  # Permission for EventBridge to invoke Lambda
+  WarmupLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AdviceAgentFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt WarmupScheduleRule.Arn
+
 Outputs:
+  BedrockPermissionCheckerArn:
+    Description: 'Bedrock Permission Checker Lambda Function ARN for action groups'
+    Value: !GetAtt BedrockPermissionCheckerFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-BedrockPermissionCheckerArn'
+
+  BedrockPermissionCheckerName:
+    Description: 'Bedrock Permission Checker Lambda Function Name'
+    Value: !Ref BedrockPermissionCheckerFunction
+    Export:
+      Name: !Sub '${AWS::StackName}-BedrockPermissionCheckerName'
+
+  BedrockApiProxyArn:
+    Description: 'Bedrock API Proxy Lambda Function ARN for action groups'
+    Value: !GetAtt BedrockApiProxyFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-BedrockApiProxyArn'
+
+  BedrockApiProxyName:
+    Description: 'Bedrock API Proxy Lambda Function Name'
+    Value: !Ref BedrockApiProxyFunction
+    Export:
+      Name: !Sub '${AWS::StackName}-BedrockApiProxyName'
+
   AdviceAgentApi:
     Description: 'API Gateway endpoint URL for AI Advice Agent'
     Value: !Sub 'https://${AdviceAgentApi}.execute-api.${AWS::Region}.amazonaws.com/dev/'
@@ -205,6 +416,10 @@ Outputs:
   AdviceAgentFunction:
     Description: 'AI Advice Agent Lambda Function ARN'
     Value: !GetAtt AdviceAgentFunction.Arn
+
+  SubscriptionHandlerFunction:
+    Description: 'Subscription Handler Lambda Function ARN'
+    Value: !GetAtt SubscriptionHandlerFunction.Arn
 
   AdviceAgentIamRole:
     Description: 'Implicit IAM Role created for AI Advice Agent function'

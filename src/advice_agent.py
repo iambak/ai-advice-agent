@@ -3,6 +3,9 @@ import os
 import requests
 import logging
 import boto3
+import time
+import random
+import hashlib
 from typing import Dict, Any, Optional, Tuple
 from enum import Enum
 
@@ -15,6 +18,50 @@ class PermissionStatus(Enum):
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
+
+class ResponseCache:
+    """Simple in-memory cache for advice responses with TTL"""
+
+    def __init__(self, max_size: int = 100, ttl_seconds: int = 3600):
+        self.cache = {}
+        self.max_size = max_size
+        self.ttl_seconds = ttl_seconds
+
+    def _generate_key(self, question: str, context: Optional[str] = None) -> str:
+        """Generate cache key from question and context"""
+        content = f"{question}|{context or ''}"
+        return hashlib.md5(content.encode()).hexdigest()
+
+    def get(self, question: str, context: Optional[str] = None) -> Optional[str]:
+        """Get cached response if exists and not expired"""
+        key = self._generate_key(question, context)
+
+        if key in self.cache:
+            response, timestamp = self.cache[key]
+            if time.time() - timestamp < self.ttl_seconds:
+                logger.info(f"Cache hit for question: {question[:50]}...")
+                return response
+            else:
+                # Expired, remove from cache
+                del self.cache[key]
+                logger.info(f"Cache expired for question: {question[:50]}...")
+
+        return None
+
+    def set(self, question: str, context: Optional[str], response: str):
+        """Cache response with TTL"""
+        key = self._generate_key(question, context)
+
+        # If cache is full, remove oldest entry
+        if len(self.cache) >= self.max_size:
+            oldest_key = min(self.cache.keys(), key=lambda k: self.cache[k][1])
+            del self.cache[oldest_key]
+
+        self.cache[key] = (response, time.time())
+        logger.info(f"Cached response for question: {question[:50]}...")
+
+# Global cache instance
+response_cache = ResponseCache()
 
 class PermissionChecker:
     """Handles permission verification with the Agent Permission API"""
@@ -103,13 +150,25 @@ class AdviceGenerator:
             return "I'd be happy to help! Could you please ask me a specific question?"
 
         try:
+            # Check cache first for instant responses
+            cached_response = response_cache.get(question, context)
+            if cached_response:
+                logger.info(f"Returning cached advice for user {user_id}")
+                return cached_response
+
+            # Cache miss - generate new response
+            logger.info(f"Cache miss - generating new advice for user {user_id}")
+
             # Stage 1: Get raw advice from external API
             raw_advice = self._get_external_advice(question, context)
 
             # Stage 2: Enhance and beautify with Bedrock
             enhanced_advice = self._enhance_with_bedrock(raw_advice, question, context, user_id)
 
-            logger.info(f"Successfully generated enhanced advice for user {user_id}")
+            # Cache the enhanced response
+            response_cache.set(question, context, enhanced_advice)
+
+            logger.info(f"Successfully generated and cached enhanced advice for user {user_id}")
             return enhanced_advice
 
         except Exception as e:
@@ -133,12 +192,12 @@ class AdviceGenerator:
 
             logger.info(f"Calling external advice API: {self.external_api_url}")
 
-            # Call external API
+            # Call external API with optimized timeout
             response = requests.post(
                 self.external_api_url,
                 json=payload,
                 headers={"Content-Type": "application/json"},
-                timeout=30
+                timeout=20  # Reduced from 30 to 20 seconds
             )
 
             if response.status_code == 200:
@@ -185,22 +244,38 @@ class AdviceGenerator:
             # Build enhancement prompt
             prompt = self._build_enhancement_prompt(raw_advice, question, context)
 
-            # Prepare Bedrock request for Titan Text G1 Premier
+            # Prepare Bedrock request for Titan Text Express with optimizations
             request_body = {
                 "inputText": prompt,
                 "textGenerationConfig": {
-                    "maxTokenCount": 800,
-                    "temperature": 0.3,
-                    "topP": 0.9
+                    "maxTokenCount": 600,  # Reduced for faster processing
+                    "temperature": 0.1,    # Lower for more consistent/faster output
+                    "topP": 0.8           # Slightly more focused for speed
                 }
             }
 
-            # Invoke Bedrock
-            response = self.bedrock_client.invoke_model(
-                modelId=self.model_id,
-                body=json.dumps(request_body),
-                contentType="application/json"
-            )
+            # Invoke Bedrock with optimized retry logic
+            max_retries = 2  # Reduced from 3 to 2
+            base_delay = 0.5  # Reduced from 1 to 0.5 seconds
+
+            for attempt in range(max_retries + 1):
+                try:
+                    response = self.bedrock_client.invoke_model(
+                        modelId=self.model_id,
+                        body=json.dumps(request_body),
+                        contentType="application/json"
+                    )
+                    break  # Success, exit retry loop
+                except Exception as e:
+                    if "ThrottlingException" in str(e) and attempt < max_retries:
+                        # Faster exponential backoff with jitter
+                        delay = base_delay * (1.5 ** attempt) + random.uniform(0, 0.5)
+                        logger.warning(f"Bedrock throttled, retrying in {delay:.1f}s (attempt {attempt + 1}/{max_retries + 1})")
+                        time.sleep(delay)
+                        continue
+                    else:
+                        # Max retries reached or different error
+                        raise e
 
             # Parse response
             response_body = json.loads(response['body'].read())
@@ -216,18 +291,10 @@ class AdviceGenerator:
             return raw_advice
 
     def _build_enhancement_prompt(self, raw_advice: str, question: str, context: Optional[str] = None) -> str:
-        """Build prompt for Bedrock to enhance the raw advice"""
-        prompt = f"""You are a text formatter. Your job is to reformat the provided advice content ONLY. Do not add any new information, recommendations, or data.
+        """Build prompt for Bedrock to enhance the raw advice with caching optimization"""
 
-Original Question: {question}"""
-
-        if context:
-            prompt += f"\nUser Context: {context}"
-
-        prompt += f"""
-
-Raw Advice Content:
-{raw_advice}
+        # CACHEABLE PREFIX - This part stays the same across requests
+        cacheable_prefix = """You are a text formatter. Your job is to reformat the provided advice content ONLY. Do not add any new information, recommendations, or data.
 
 INSTRUCTIONS:
 1. Create a TL;DR summary using ONLY the key points already mentioned in the content
@@ -242,9 +309,26 @@ TL;DR: [Summarize only the existing key recommendations in 2-3 sentences]
 
 [Convert the existing detailed advice into flowing paragraphs. Remove markdown formatting but keep all the same information, prices, data, and recommendations that were already provided. Just present it as readable paragraphs instead of bullet points and headers.]
 
-CRITICAL: Use only the information provided in the raw advice content. Do not add anything new."""
+CRITICAL: Use only the information provided in the raw advice content. Do not add anything new.
 
-        return prompt
+---
+
+"""
+
+        # VARIABLE CONTENT - This changes per request
+        variable_content = f"Original Question: {question}"
+
+        if context:
+            variable_content += f"\nUser Context: {context}"
+
+        variable_content += f"""
+
+Raw Advice Content:
+{raw_advice}
+
+Please reformat the above content according to the instructions."""
+
+        return cacheable_prefix + variable_content
 
     def _fallback_advice(self, question: str, context: Optional[str] = None) -> str:
         """Fallback advice if both external API and Bedrock fail"""
@@ -286,6 +370,34 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     }
 
     try:
+        # Handle scheduled warm-up events
+        if event.get('warmup') or event.get('source') == 'scheduled-event':
+            logger.info("Warm-up request received - keeping Lambda and Bedrock warm")
+
+            # Perform a quick Bedrock call to keep it warm
+            try:
+                advice_generator = AdviceGenerator()
+                # Quick warm-up call with minimal processing
+                test_response = advice_generator._enhance_with_bedrock(
+                    "Warm-up test content for maintaining Bedrock performance.",
+                    "System warm-up call",
+                    None,
+                    "system-warmup"
+                )
+                logger.info("Bedrock warm-up successful")
+            except Exception as e:
+                logger.warning(f"Bedrock warm-up failed: {e}")
+
+            return {
+                'statusCode': 200,
+                'headers': headers,
+                'body': json.dumps({
+                    'status': 'warm-up-complete',
+                    'timestamp': context.aws_request_id,
+                    'message': 'Lambda and Bedrock warm-up completed'
+                })
+            }
+
         # Handle OPTIONS request for CORS
         if event.get('httpMethod') == 'OPTIONS':
             return {

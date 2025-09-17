@@ -1,0 +1,153 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Advice API Proxy",
+    "version": "1.0.0",
+    "description": "API for getting personalized advice"
+  },
+  "paths": {
+    "/getAdvice": {
+      "post": {
+        "operationId": "getAdvice",
+        "summary": "Get advice from the API",
+        "description": "Get personalized advice for a user",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "user_id": {
+                    "type": "string",
+                    "description": "User identifier"
+                  },
+                  "question": {
+                    "type": "string",
+                    "description": "The question to get advice for"
+                  },
+                  "context": {
+                    "type": "string",
+                    "description": "Optional context"
+                  }
+                },
+                "required": ["user_id", "question"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful advice response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "advice": {
+                      "type": "string"
+                    },
+                    "user_id": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/subscribeToAgent": {
+      "post": {
+        "operationId": "subscribeToAgent",
+        "summary": "Subscribe user to agent",
+        "description": "Subscribe a user to a specific agent service",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "user_id": {
+                    "type": "string",
+                    "description": "User identifier"
+                  },
+                  "agent_name": {
+                    "type": "string",
+                    "description": "Name of the agent to subscribe to",
+                    "default": "advice-agent"
+                  }
+                },
+                "required": ["user_id"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful subscription response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    },
+                    "user_id": {
+                      "type": "string"
+                    },
+                    "agent_name": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Permission denied or user not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "user_id": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
