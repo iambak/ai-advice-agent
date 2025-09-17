@@ -133,6 +133,7 @@ class AdviceGenerator:
         self.external_api_url = os.environ.get('EXTERNAL_ADVICE_API_URL', 'http://3.93.70.165:8000/advise')
         self.default_length = os.environ.get('ADVICE_LENGTH', 'long')
         self.default_temperature = float(os.environ.get('ADVICE_TEMPERATURE', '0.5'))
+        self.bypass_bedrock = os.environ.get('BYPASS_BEDROCK_ENHANCEMENT', 'true').lower() == 'true'
 
     def generate_advice(self, question: str, context: Optional[str] = None, user_id: str = None) -> str:
         """
@@ -162,14 +163,19 @@ class AdviceGenerator:
             # Stage 1: Get raw advice from external API
             raw_advice = self._get_external_advice(question, context)
 
-            # Stage 2: Enhance and beautify with Bedrock
-            enhanced_advice = self._enhance_with_bedrock(raw_advice, question, context, user_id)
+            # Stage 2: Conditional Bedrock enhancement based on bypass flag
+            if self.bypass_bedrock:
+                logger.info(f"Bypassing Bedrock enhancement for user {user_id}")
+                final_advice = self._format_raw_advice(raw_advice)
+            else:
+                logger.info(f"Enhancing advice with Bedrock for user {user_id}")
+                final_advice = self._enhance_with_bedrock(raw_advice, question, context, user_id)
 
-            # Cache the enhanced response
-            response_cache.set(question, context, enhanced_advice)
+            # Cache the final response
+            response_cache.set(question, context, final_advice)
 
-            logger.info(f"Successfully generated and cached enhanced advice for user {user_id}")
-            return enhanced_advice
+            logger.info(f"Successfully generated and cached advice for user {user_id}")
+            return final_advice
 
         except Exception as e:
             logger.error(f"Error in two-stage advice generation: {e}")
@@ -237,6 +243,29 @@ class AdviceGenerator:
         except Exception as e:
             logger.error(f"Error getting external advice: {e}")
             raise
+
+    def _format_raw_advice(self, raw_advice: str) -> str:
+        """Basic formatting for raw advice when bypassing Bedrock"""
+        try:
+            # Basic text cleanup without AI enhancement
+            formatted_advice = raw_advice.strip()
+
+            # Remove excessive whitespace and normalize line breaks
+            formatted_advice = '\n'.join(line.strip() for line in formatted_advice.split('\n') if line.strip())
+
+            # Basic structure: try to add a simple summary if the content is long
+            lines = formatted_advice.split('\n')
+            if len(lines) > 3 and len(formatted_advice) > 200:
+                # Add a simple TL;DR prefix for longer content
+                formatted_advice = f"**Quick Summary**: {lines[0]}\n\n{formatted_advice}"
+
+            logger.info("Applied basic formatting to raw advice")
+            return formatted_advice
+
+        except Exception as e:
+            logger.error(f"Error formatting raw advice: {e}")
+            # If formatting fails, return the original raw advice
+            return raw_advice
 
     def _enhance_with_bedrock(self, raw_advice: str, question: str, context: Optional[str] = None, user_id: str = None) -> str:
         """Enhance raw advice using Bedrock"""
